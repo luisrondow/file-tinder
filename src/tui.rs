@@ -1,6 +1,7 @@
 // TUI module for rendering the terminal interface
 #![allow(dead_code)]
 
+use crate::async_preview::{PreviewState, SyncPreviewManager};
 use crate::domain::AppState;
 use crate::preview;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -61,7 +62,7 @@ pub fn handle_key_event(key: KeyEvent) -> KeyAction {
     }
 }
 
-/// Renders the TUI
+/// Renders the TUI (legacy, without async preview)
 pub fn render(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -74,6 +75,26 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_header(frame, chunks[0], state);
     render_content(frame, chunks[1], state);
+    render_footer(frame, chunks[2]);
+}
+
+/// Renders the TUI with async preview support
+pub fn render_with_preview(
+    frame: &mut Frame,
+    state: &AppState,
+    preview_manager: &mut SyncPreviewManager,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Min(0),    // Content
+            Constraint::Length(3), // Footer
+        ])
+        .split(frame.area());
+
+    render_header(frame, chunks[0], state);
+    render_content_async(frame, chunks[1], state, preview_manager);
     render_footer(frame, chunks[2]);
 }
 
@@ -97,7 +118,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(header, area);
 }
 
-/// Renders the main content area
+/// Renders the main content area (synchronous version)
 fn render_content(frame: &mut Frame, area: Rect, state: &AppState) {
     let content = if let Some(file) = state.current_file() {
         // Generate file preview
@@ -129,6 +150,68 @@ fn render_content(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     frame.render_widget(content, area);
+}
+
+/// Renders the main content area with async preview loading
+fn render_content_async(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    preview_manager: &mut SyncPreviewManager,
+) {
+    let content = if let Some(file) = state.current_file() {
+        // Get preview state from manager
+        let preview_state = preview_manager.request_preview(file);
+
+        let (preview_lines, title_suffix) = match preview_state {
+            PreviewState::Loading => {
+                let loading_lines = generate_loading_indicator(file);
+                (loading_lines, " [Loading...]")
+            }
+            PreviewState::Ready(lines) => (lines.clone(), ""),
+            PreviewState::Error(e) => {
+                let error_lines = vec![
+                    format!("Error generating preview: {}", e),
+                    String::new(),
+                    format!("File: {}", file.name),
+                    format!("Path: {}", file.path.display()),
+                    format!("Size: {} bytes", file.size),
+                    format!("Type: {:?}", file.file_type),
+                ];
+                (error_lines, " [Error]")
+            }
+        };
+
+        // Convert strings to Lines
+        let lines: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Preview: {}{}", file.name, title_suffix)),
+            )
+            .wrap(Wrap { trim: false })
+    } else {
+        Paragraph::new("No files to display")
+            .block(Block::default().borders(Borders::ALL).title("Content"))
+    };
+
+    frame.render_widget(content, area);
+}
+
+/// Generates a loading indicator for file preview
+fn generate_loading_indicator(file: &crate::domain::FileEntry) -> Vec<String> {
+    vec![
+        String::new(),
+        format!("  Loading preview for: {}", file.name),
+        String::new(),
+        "  ◐ Loading...".to_string(),
+        String::new(),
+        format!("  File type: {:?}", file.file_type),
+        format!("  Size: {} bytes", file.size),
+        format!("  Path: {}", file.path.display()),
+    ]
 }
 
 /// Renders the footer with controls
