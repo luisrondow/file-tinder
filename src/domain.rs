@@ -82,6 +82,69 @@ pub struct AppState {
     pub decisions_stack: Vec<(usize, Decision)>,
 }
 
+/// Discovers files in a directory, filtering hidden files and sorting by modification date.
+///
+/// # Arguments
+/// * `dir_path` - The directory to scan for files
+///
+/// # Returns
+/// * `Ok(Vec<FileEntry>)` - A vector of file entries sorted by modification date (oldest first)
+/// * `Err(io::Error)` - If the directory cannot be read or accessed
+///
+/// # Behavior
+/// - Filters out hidden files (names starting with '.')
+/// - Filters out directories
+/// - Does not recurse into subdirectories
+/// - Sorts results by modification date in ascending order
+/// - Handles permission errors gracefully by skipping inaccessible files
+pub fn discover_files(dir_path: &Path) -> io::Result<Vec<FileEntry>> {
+    let mut files = Vec::new();
+
+    // Read directory entries
+    let entries = fs::read_dir(dir_path)?;
+
+    for entry_result in entries {
+        // Skip entries that cannot be read (permission errors, etc.)
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(_) => continue, // Gracefully skip inaccessible entries
+        };
+
+        let path = entry.path();
+
+        // Get file name and skip hidden files (starting with '.')
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        // Skip directories
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue, // Gracefully skip if metadata cannot be read
+        };
+
+        if metadata.is_dir() {
+            continue;
+        }
+
+        // Create FileEntry from path
+        match FileEntry::from_path(&path) {
+            Ok(file_entry) => files.push(file_entry),
+            Err(_) => continue, // Gracefully skip if FileEntry cannot be created
+        }
+    }
+
+    // Sort by modification date (oldest first)
+    files.sort_by(|a, b| a.modified_date.cmp(&b.modified_date));
+
+    Ok(files)
+}
+
 impl AppState {
     pub fn new(files: Vec<FileEntry>) -> Self {
         Self {
@@ -321,6 +384,135 @@ mod tests {
 
             let undone = state.undo();
             assert!(undone.is_none());
+        }
+    }
+
+    mod file_discovery_tests {
+        use super::*;
+        use std::fs;
+        use std::thread;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        #[test]
+        fn test_discover_files_in_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            // Create test files
+            fs::write(dir_path.join("file1.txt"), b"content1").unwrap();
+            fs::write(dir_path.join("file2.rs"), b"content2").unwrap();
+            fs::write(dir_path.join("file3.md"), b"content3").unwrap();
+
+            let files = discover_files(dir_path).unwrap();
+
+            assert_eq!(files.len(), 3);
+            let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+            assert!(names.contains(&"file1.txt"));
+            assert!(names.contains(&"file2.rs"));
+            assert!(names.contains(&"file3.md"));
+        }
+
+        #[test]
+        fn test_discover_files_filters_hidden_files() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            // Create regular and hidden files
+            fs::write(dir_path.join("visible.txt"), b"content").unwrap();
+            fs::write(dir_path.join(".hidden"), b"secret").unwrap();
+            fs::write(dir_path.join(".gitignore"), b"ignore").unwrap();
+
+            let files = discover_files(dir_path).unwrap();
+
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].name, "visible.txt");
+        }
+
+        #[test]
+        fn test_discover_files_filters_hidden_directories() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            // Create regular directory with file
+            let visible_dir = dir_path.join("visible_dir");
+            fs::create_dir(&visible_dir).unwrap();
+            fs::write(visible_dir.join("file.txt"), b"content").unwrap();
+
+            // Create hidden directory with file
+            let hidden_dir = dir_path.join(".hidden_dir");
+            fs::create_dir(&hidden_dir).unwrap();
+            fs::write(hidden_dir.join("file.txt"), b"secret").unwrap();
+
+            // Create file in root
+            fs::write(dir_path.join("root.txt"), b"root").unwrap();
+
+            let files = discover_files(dir_path).unwrap();
+
+            // Should only find root.txt, not files in .hidden_dir
+            let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+            assert!(names.contains(&"root.txt"));
+            assert!(!names.iter().any(|n| n.contains("hidden")));
+        }
+
+        #[test]
+        fn test_discover_files_sorts_by_modification_date() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            // Create files with delays to ensure different modification times
+            fs::write(dir_path.join("oldest.txt"), b"first").unwrap();
+            thread::sleep(Duration::from_millis(10));
+
+            fs::write(dir_path.join("middle.txt"), b"second").unwrap();
+            thread::sleep(Duration::from_millis(10));
+
+            fs::write(dir_path.join("newest.txt"), b"third").unwrap();
+
+            let files = discover_files(dir_path).unwrap();
+
+            assert_eq!(files.len(), 3);
+            // Files should be sorted by modification date (oldest first)
+            assert_eq!(files[0].name, "oldest.txt");
+            assert_eq!(files[1].name, "middle.txt");
+            assert_eq!(files[2].name, "newest.txt");
+
+            // Verify dates are in ascending order
+            assert!(files[0].modified_date <= files[1].modified_date);
+            assert!(files[1].modified_date <= files[2].modified_date);
+        }
+
+        #[test]
+        fn test_discover_files_empty_directory() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            let files = discover_files(dir_path).unwrap();
+
+            assert_eq!(files.len(), 0);
+        }
+
+        #[test]
+        fn test_discover_files_nonexistent_directory() {
+            let result = discover_files(Path::new("/nonexistent/directory"));
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_discover_files_only_files_not_directories() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir_path = temp_dir.path();
+
+            // Create files and subdirectories
+            fs::write(dir_path.join("file.txt"), b"content").unwrap();
+            fs::create_dir(dir_path.join("subdir")).unwrap();
+            fs::write(dir_path.join("subdir").join("nested.txt"), b"nested").unwrap();
+
+            let files = discover_files(dir_path).unwrap();
+
+            // Should only include the root file, not the subdirectory or its contents
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].name, "file.txt");
         }
     }
 }
