@@ -171,11 +171,8 @@ impl DecisionEngine {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let staging_dir = std::env::temp_dir().join(format!(
-            "file-tinder-{}-{}",
-            std::process::id(),
-            timestamp
-        ));
+        let staging_dir =
+            std::env::temp_dir().join(format!("file-tinder-{}-{}", std::process::id(), timestamp));
         fs::create_dir_all(&staging_dir).ok();
 
         Self {
@@ -230,9 +227,10 @@ impl DecisionEngine {
     /// For Keep decisions, simply removes from the stack.
     /// For Trash decisions, restores the file from the staging directory.
     pub fn undo(&mut self) -> io::Result<()> {
-        let (index, decision) = self.decisions.pop().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "No decisions to undo")
-        })?;
+        let (index, decision) = self
+            .decisions
+            .pop()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No decisions to undo"))?;
 
         match decision {
             Decision::Keep => {
