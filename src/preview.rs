@@ -2,8 +2,12 @@
 #![allow(dead_code)]
 
 use crate::domain::FileEntry;
-use image::{DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, Pixel};
 use pdfium_render::prelude::*;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -13,7 +17,17 @@ use syntect::parsing::SyntaxSet;
 
 const MAX_PREVIEW_LINES: usize = 50;
 const MAX_IMAGE_WIDTH: u32 = 80;
-const MAX_IMAGE_HEIGHT: u32 = 40;
+/// Height is halved because we render 2 pixels per terminal row using half-blocks
+const MAX_IMAGE_HEIGHT: u32 = 60;
+
+/// Represents preview content that can be either plain text or styled image lines
+#[derive(Debug, Clone)]
+pub enum PreviewContent {
+    /// Plain text lines (for text files, binary info, etc.)
+    Text(Vec<String>),
+    /// Styled lines with color information (for images and PDFs)
+    Styled(Vec<Line<'static>>),
+}
 
 /// Detects the syntax name from a file extension
 pub fn detect_syntax_from_extension(extension: &str) -> Option<String> {
@@ -115,35 +129,61 @@ pub fn calculate_resize_dimensions(
     }
 }
 
-/// Converts an image to ASCII art for terminal display
-pub fn image_to_ascii(img: &DynamicImage, width: u32, height: u32) -> Vec<String> {
-    let img = img.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
-    let img = img.to_luma8();
+/// Converts an image to styled lines using half-block characters for terminal display.
+/// Uses the upper half block character (▀) with foreground color for the upper pixel
+/// and background color for the lower pixel, effectively displaying 2 pixels per cell.
+pub fn image_to_halfblock_lines(img: &DynamicImage, width: u32, height: u32) -> Vec<Line<'static>> {
+    // Ensure height is even for proper half-block rendering
+    let height = if height.is_multiple_of(2) {
+        height
+    } else {
+        height + 1
+    };
 
-    let ascii_chars = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
-    let ascii_len = ascii_chars.len() as f64;
+    // Use Triangle filter - fast and good quality for terminal display
+    // (Lanczos3 is too slow for large images like 4K wallpapers)
+    let img = img.resize_exact(width, height, image::imageops::FilterType::Triangle);
+    let img = img.to_rgb8();
 
-    let mut lines = Vec::new();
-    for y in 0..height {
-        let mut line = String::new();
+    let term_height = height / 2;
+    let mut lines = Vec::with_capacity(term_height as usize);
+
+    for y in 0..term_height {
+        let upper_y = y * 2;
+        let lower_y = upper_y + 1;
+
+        let mut spans = Vec::with_capacity(width as usize);
+
         for x in 0..width {
-            let pixel = img.get_pixel(x, y);
-            let intensity = pixel[0] as f64 / 255.0;
-            let char_index = (intensity * (ascii_len - 1.0)) as usize;
-            let ch = ascii_chars.chars().nth(char_index).unwrap_or(' ');
-            line.push(ch);
+            let upper_pixel = img.get_pixel(x, upper_y).to_rgb();
+            let lower_pixel = if lower_y < height {
+                img.get_pixel(x, lower_y).to_rgb()
+            } else {
+                upper_pixel
+            };
+
+            // Upper half block: ▀ (U+2580)
+            // Foreground color = upper pixel, Background color = lower pixel
+            let style = Style::default()
+                .fg(Color::Rgb(upper_pixel[0], upper_pixel[1], upper_pixel[2]))
+                .bg(Color::Rgb(lower_pixel[0], lower_pixel[1], lower_pixel[2]));
+
+            spans.push(Span::styled("▀", style));
         }
-        lines.push(line);
+
+        lines.push(Line::from(spans));
     }
 
     lines
 }
 
-/// Generates an image preview using ASCII art
-pub fn generate_image_preview(file_entry: &FileEntry) -> io::Result<Vec<String>> {
+/// Generates an image preview using half-block character rendering for true color display
+pub fn generate_image_preview(file_entry: &FileEntry) -> io::Result<PreviewContent> {
     let img = load_image(&file_entry.path)?;
     let (original_width, original_height) = img.dimensions();
 
+    // Calculate resize dimensions - note that the height will be halved in rendering
+    // because we use 2 pixels per terminal row
     let (new_width, new_height) = calculate_resize_dimensions(
         original_width,
         original_height,
@@ -151,29 +191,51 @@ pub fn generate_image_preview(file_entry: &FileEntry) -> io::Result<Vec<String>>
         MAX_IMAGE_HEIGHT,
     );
 
-    let mut preview = vec![
-        format!("Image: {}", file_entry.name),
-        format!("Dimensions: {}x{} pixels", original_width, original_height),
-        format!("Size: {} bytes", file_entry.size),
-        String::new(),
+    // Create header lines with image info
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
+    let info_style = Style::default().fg(Color::Gray);
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled("Image: ", header_style),
+            Span::styled(file_entry.name.clone(), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("Dimensions: {}×{} px", original_width, original_height),
+                info_style,
+            ),
+            Span::raw("  "),
+            Span::styled(format!("Size: {} bytes", file_entry.size), info_style),
+        ]),
+        Line::from(""),
     ];
 
-    // Generate ASCII art
-    let ascii_art = image_to_ascii(&img, new_width, new_height);
-    preview.extend(ascii_art);
+    // Generate half-block image lines
+    let image_lines = image_to_halfblock_lines(&img, new_width, new_height);
+    lines.extend(image_lines);
 
-    Ok(preview)
+    Ok(PreviewContent::Styled(lines))
+}
+
+/// Attempts to create a Pdfium instance using explicit binding (no panic)
+fn try_create_pdfium() -> Option<Pdfium> {
+    // Try to bind to the system library first (no panic, returns Result)
+    let bindings = Pdfium::bind_to_system_library()
+        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./")));
+
+    bindings.ok().map(Pdfium::new)
 }
 
 /// Checks if Pdfium library is available by attempting to initialize it
 pub fn is_pdfium_available() -> bool {
-    std::panic::catch_unwind(Pdfium::default).is_ok()
+    try_create_pdfium().is_some()
 }
 
 /// Loads a PDF and renders the first page to an image
 pub fn render_pdf_first_page(path: &Path) -> io::Result<DynamicImage> {
-    // Initialize Pdfium library - this will panic if the library isn't available
-    let pdfium = std::panic::catch_unwind(Pdfium::default).map_err(|_| {
+    // Initialize Pdfium library using explicit binding (no panic)
+    let pdfium = try_create_pdfium().ok_or_else(|| {
         io::Error::other("Pdfium library not available. Install libpdfium to enable PDF previews.")
     })?;
 
@@ -211,8 +273,8 @@ pub fn render_pdf_first_page(path: &Path) -> io::Result<DynamicImage> {
     Ok(DynamicImage::ImageRgba8(img_buffer))
 }
 
-/// Generates a PDF preview by rendering the first page as ASCII art
-pub fn generate_pdf_preview(file_entry: &FileEntry) -> io::Result<Vec<String>> {
+/// Generates a PDF preview by rendering the first page with half-block characters
+pub fn generate_pdf_preview(file_entry: &FileEntry) -> io::Result<PreviewContent> {
     // Try to render the PDF
     match render_pdf_first_page(&file_entry.path) {
         Ok(img) => {
@@ -225,25 +287,35 @@ pub fn generate_pdf_preview(file_entry: &FileEntry) -> io::Result<Vec<String>> {
                 MAX_IMAGE_HEIGHT,
             );
 
-            let mut preview = vec![
-                format!("PDF: {}", file_entry.name),
-                format!("Size: {} bytes", file_entry.size),
-                format!(
-                    "Preview: First page rendered at {}x{} pixels",
-                    original_width, original_height
-                ),
-                String::new(),
+            // Create header lines with PDF info
+            let header_style = Style::default().add_modifier(Modifier::BOLD);
+            let info_style = Style::default().fg(Color::Gray);
+
+            let mut lines: Vec<Line<'static>> = vec![
+                Line::from(vec![
+                    Span::styled("PDF: ", header_style),
+                    Span::styled(file_entry.name.clone(), Style::default().fg(Color::Magenta)),
+                ]),
+                Line::from(vec![
+                    Span::styled(format!("Size: {} bytes", file_entry.size), info_style),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("Rendered at {}×{} px", original_width, original_height),
+                        info_style,
+                    ),
+                ]),
+                Line::from(""),
             ];
 
-            // Generate ASCII art from the rendered page
-            let ascii_art = image_to_ascii(&img, new_width, new_height);
-            preview.extend(ascii_art);
+            // Generate half-block image lines from the rendered page
+            let image_lines = image_to_halfblock_lines(&img, new_width, new_height);
+            lines.extend(image_lines);
 
-            Ok(preview)
+            Ok(PreviewContent::Styled(lines))
         }
         Err(e) => {
-            // If PDF rendering fails, return error information
-            Ok(vec![
+            // If PDF rendering fails, return error information as text
+            Ok(PreviewContent::Text(vec![
                 format!("PDF: {}", file_entry.name),
                 format!("Size: {} bytes", file_entry.size),
                 String::new(),
@@ -251,23 +323,23 @@ pub fn generate_pdf_preview(file_entry: &FileEntry) -> io::Result<Vec<String>> {
                 String::new(),
                 "[This PDF may be corrupted, password-protected, or use unsupported features]"
                     .to_string(),
-            ])
+            ]))
         }
     }
 }
 
 /// Generates a preview for any file type
-pub fn generate_preview(file_entry: &FileEntry) -> io::Result<Vec<String>> {
+pub fn generate_preview(file_entry: &FileEntry) -> io::Result<PreviewContent> {
     use crate::domain::FileType;
 
     match file_entry.file_type {
-        FileType::Text => generate_text_preview(file_entry),
-        FileType::Binary => Ok(vec![
+        FileType::Text => generate_text_preview(file_entry).map(PreviewContent::Text),
+        FileType::Binary => Ok(PreviewContent::Text(vec![
             format!("Binary file: {}", file_entry.name),
             format!("Size: {} bytes", file_entry.size),
             String::new(),
             "[Binary content not displayed]".to_string(),
-        ]),
+        ])),
         FileType::Image => generate_image_preview(file_entry),
         FileType::Pdf => generate_pdf_preview(file_entry),
     }
@@ -412,9 +484,14 @@ mod tests {
         };
 
         let preview = generate_preview(&file_entry).unwrap();
-        assert!(preview.len() > 0);
-        assert!(preview[0].contains("Binary file"));
-        assert!(preview.iter().any(|line| line.contains("not displayed")));
+        match preview {
+            PreviewContent::Text(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines[0].contains("Binary file"));
+                assert!(lines.iter().any(|line| line.contains("not displayed")));
+            }
+            _ => panic!("Expected Text preview for binary file"),
+        }
     }
 
     #[test]
@@ -430,18 +507,25 @@ mod tests {
         };
 
         let preview = generate_preview(&file_entry).unwrap();
-        assert!(!preview.is_empty());
-        // Should contain PDF reference in header
-        assert!(preview[0].contains("PDF"));
-        // Non-existent file will show error message about rendering
-        let preview_text = preview.join(" ");
-        assert!(
-            preview_text.contains("Error")
-                || preview_text.contains("corrupted")
-                || preview_text.contains("not available"),
-            "Expected error message for non-existent PDF: {}",
-            preview_text
-        );
+        match preview {
+            PreviewContent::Text(lines) => {
+                assert!(!lines.is_empty());
+                // Should contain PDF reference in header
+                assert!(lines[0].contains("PDF"));
+                // Non-existent file will show error message about rendering
+                let preview_text = lines.join(" ");
+                assert!(
+                    preview_text.contains("Error")
+                        || preview_text.contains("corrupted")
+                        || preview_text.contains("not available"),
+                    "Expected error message for non-existent PDF: {}",
+                    preview_text
+                );
+            }
+            PreviewContent::Styled(_) => {
+                panic!("Expected Text preview for non-existent PDF (error case)");
+            }
+        }
     }
 
     // Image preview tests
@@ -495,14 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn test_image_to_ascii_dimensions() {
-        // Create a simple white 10x10 image
+    fn test_image_to_halfblock_dimensions() {
+        // Create a simple 10x10 image
         let img = DynamicImage::new_rgb8(10, 10);
-        let ascii = image_to_ascii(&img, 5, 5);
+        // Request 5 width and 6 height (even for proper half-block rendering)
+        let lines = image_to_halfblock_lines(&img, 5, 6);
 
-        assert_eq!(ascii.len(), 5); // 5 rows
-        for line in &ascii {
-            assert_eq!(line.len(), 5); // 5 characters per row
+        // Height 6 produces 3 terminal rows (6/2)
+        assert_eq!(lines.len(), 3);
+        // Each line should have 5 spans (one per column)
+        for line in &lines {
+            assert_eq!(line.spans.len(), 5);
         }
     }
 
@@ -571,14 +658,21 @@ mod tests {
 
         let preview = generate_image_preview(&file_entry).unwrap();
 
-        // Check that preview has header information
-        assert!(preview[0].contains("Image"));
-        assert!(preview[0].contains("test.png"));
-        assert!(preview[1].contains("100x100"));
-        assert!(preview[2].contains("bytes"));
-
-        // Check that ASCII art was generated (should have more than just the header lines)
-        assert!(preview.len() > 4);
+        match preview {
+            PreviewContent::Styled(lines) => {
+                // Should have header lines plus image content
+                assert!(lines.len() > 4);
+                // First line should contain "Image:" (in a Span)
+                let first_line_text: String = lines[0]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect();
+                assert!(first_line_text.contains("Image"));
+                assert!(first_line_text.contains("test.png"));
+            }
+            _ => panic!("Expected Styled preview for image"),
+        }
     }
 
     #[test]
@@ -604,9 +698,18 @@ mod tests {
         let preview = generate_preview(&file_entry).unwrap();
 
         // Verify that generate_preview dispatches to generate_image_preview
-        assert!(preview.len() > 0);
-        assert!(preview[0].contains("Image"));
-        assert!(preview[1].contains("50x50"));
+        match preview {
+            PreviewContent::Styled(lines) => {
+                assert!(!lines.is_empty());
+                let first_line_text: String = lines[0]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect();
+                assert!(first_line_text.contains("Image"));
+            }
+            _ => panic!("Expected Styled preview for image"),
+        }
     }
 
     // PDF preview tests
@@ -691,14 +794,22 @@ mod tests {
 
         let preview = generate_pdf_preview(&file_entry).unwrap();
 
-        // Check that preview has header information
-        assert!(preview.len() > 0);
-        assert!(preview[0].contains("PDF"));
-        assert!(preview[0].contains("document.pdf"));
-        assert!(preview[1].contains("bytes"));
-
-        // Should have ASCII art (more than just header lines)
-        assert!(preview.len() > 4);
+        match preview {
+            PreviewContent::Styled(lines) => {
+                // Should have header lines plus rendered content
+                assert!(lines.len() > 4);
+                let first_line_text: String = lines[0]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect();
+                assert!(first_line_text.contains("PDF"));
+                assert!(first_line_text.contains("document.pdf"));
+            }
+            PreviewContent::Text(_) => {
+                panic!("Expected Styled preview for valid PDF");
+            }
+        }
     }
 
     #[test]
@@ -713,16 +824,19 @@ mod tests {
 
         let preview = generate_pdf_preview(&file_entry).unwrap();
 
-        // Should still return a preview (with error message)
-        assert!(preview.len() > 0);
-        assert!(preview[0].contains("PDF"));
-
-        // Should mention error
-        let preview_text = preview.join(" ");
-        assert!(
-            preview_text.contains("Error") || preview_text.contains("corrupted"),
-            "Expected error message in preview"
-        );
+        // Should return Text variant with error message
+        match preview {
+            PreviewContent::Text(lines) => {
+                assert!(!lines.is_empty());
+                assert!(lines[0].contains("PDF"));
+                let preview_text = lines.join(" ");
+                assert!(
+                    preview_text.contains("Error") || preview_text.contains("corrupted"),
+                    "Expected error message in preview"
+                );
+            }
+            _ => panic!("Expected Text preview for non-existent PDF"),
+        }
     }
 
     #[test]
@@ -746,13 +860,18 @@ mod tests {
 
         let preview = generate_pdf_preview(&file_entry).unwrap();
 
-        // Should return error preview
-        assert!(preview.len() > 0);
-        let preview_text = preview.join(" ");
-        assert!(
-            preview_text.contains("Error") || preview_text.contains("corrupted"),
-            "Expected error message for invalid PDF"
-        );
+        // Should return Text variant with error message
+        match preview {
+            PreviewContent::Text(lines) => {
+                assert!(!lines.is_empty());
+                let preview_text = lines.join(" ");
+                assert!(
+                    preview_text.contains("Error") || preview_text.contains("corrupted"),
+                    "Expected error message for invalid PDF"
+                );
+            }
+            _ => panic!("Expected Text preview for invalid PDF"),
+        }
     }
 
     #[test]
@@ -789,7 +908,17 @@ mod tests {
         let preview = generate_preview(&file_entry).unwrap();
 
         // Verify that generate_preview dispatches to generate_pdf_preview
-        assert!(preview.len() > 0);
-        assert!(preview[0].contains("PDF"));
+        match preview {
+            PreviewContent::Styled(lines) => {
+                assert!(!lines.is_empty());
+                let first_line_text: String = lines[0]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect();
+                assert!(first_line_text.contains("PDF"));
+            }
+            _ => panic!("Expected Styled preview for valid PDF"),
+        }
     }
 }

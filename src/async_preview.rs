@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use crate::domain::FileEntry;
-use crate::preview::generate_preview;
+use crate::preview::{generate_preview, PreviewContent};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ const CACHE_SIZE: usize = 10;
 pub enum PreviewState {
     /// Preview is loading
     Loading,
-    /// Preview is ready
-    Ready(Vec<String>),
+    /// Preview is ready with content
+    Ready(PreviewContent),
     /// Preview failed with error
     Error(String),
 }
@@ -39,7 +39,7 @@ enum PreviewRequest {
 #[derive(Debug)]
 struct PreviewCache {
     /// Cached previews mapped by file path
-    cache: HashMap<PathBuf, Vec<String>>,
+    cache: HashMap<PathBuf, PreviewContent>,
     /// Order of access for LRU eviction (most recent at end)
     access_order: Vec<PathBuf>,
     /// Maximum cache size
@@ -56,7 +56,7 @@ impl PreviewCache {
     }
 
     /// Get a cached preview, updating access order
-    fn get(&mut self, path: &PathBuf) -> Option<Vec<String>> {
+    fn get(&mut self, path: &PathBuf) -> Option<PreviewContent> {
         if let Some(preview) = self.cache.get(path) {
             // Update access order (move to end)
             self.access_order.retain(|p| p != path);
@@ -68,7 +68,7 @@ impl PreviewCache {
     }
 
     /// Insert a preview, evicting oldest if necessary
-    fn insert(&mut self, path: PathBuf, preview: Vec<String>) {
+    fn insert(&mut self, path: PathBuf, preview: PreviewContent) {
         // Remove if already exists
         if self.cache.contains_key(&path) {
             self.access_order.retain(|p| p != &path);
@@ -254,7 +254,7 @@ impl PreviewLoader {
     }
 
     /// Try to get a cached preview without loading
-    pub async fn get_cached(&self, path: &PathBuf) -> Option<Vec<String>> {
+    pub async fn get_cached(&self, path: &PathBuf) -> Option<PreviewContent> {
         let mut cache = self.cache.lock().await;
         cache.get(path)
     }
@@ -448,7 +448,7 @@ mod tests {
         fn test_cache_insert_and_get() {
             let mut cache = PreviewCache::new(5);
             let path = PathBuf::from("/test/file.txt");
-            let preview = vec!["line1".to_string(), "line2".to_string()];
+            let preview = PreviewContent::Text(vec!["line1".to_string(), "line2".to_string()]);
 
             cache.insert(path.clone(), preview.clone());
 
@@ -458,7 +458,12 @@ mod tests {
 
             let cached = cache.get(&path);
             assert!(cached.is_some());
-            assert_eq!(cached.unwrap(), preview);
+            match cached.unwrap() {
+                PreviewContent::Text(lines) => {
+                    assert_eq!(lines, vec!["line1".to_string(), "line2".to_string()]);
+                }
+                _ => panic!("Expected Text content"),
+            }
         }
 
         #[test]
@@ -468,14 +473,14 @@ mod tests {
             // Insert 3 items
             for i in 0..3 {
                 let path = PathBuf::from(format!("/test/file{}.txt", i));
-                cache.insert(path, vec![format!("preview {}", i)]);
+                cache.insert(path, PreviewContent::Text(vec![format!("preview {}", i)]));
             }
 
             assert_eq!(cache.len(), 3);
 
             // Insert 4th item, should evict first
             let path4 = PathBuf::from("/test/file3.txt");
-            cache.insert(path4, vec!["preview 3".to_string()]);
+            cache.insert(path4, PreviewContent::Text(vec!["preview 3".to_string()]));
 
             assert_eq!(cache.len(), 3);
             assert!(!cache.contains(&PathBuf::from("/test/file0.txt")));
@@ -491,7 +496,7 @@ mod tests {
             // Insert 3 items
             for i in 0..3 {
                 let path = PathBuf::from(format!("/test/file{}.txt", i));
-                cache.insert(path, vec![format!("preview {}", i)]);
+                cache.insert(path, PreviewContent::Text(vec![format!("preview {}", i)]));
             }
 
             // Access the first item (making it most recently used)
@@ -499,7 +504,7 @@ mod tests {
 
             // Insert 4th item, should evict file1 (oldest accessed)
             let path4 = PathBuf::from("/test/file3.txt");
-            cache.insert(path4, vec!["preview 3".to_string()]);
+            cache.insert(path4, PreviewContent::Text(vec!["preview 3".to_string()]));
 
             assert!(cache.contains(&PathBuf::from("/test/file0.txt"))); // Was accessed, should remain
             assert!(!cache.contains(&PathBuf::from("/test/file1.txt"))); // Should be evicted
@@ -513,7 +518,7 @@ mod tests {
 
             for i in 0..3 {
                 let path = PathBuf::from(format!("/test/file{}.txt", i));
-                cache.insert(path, vec![format!("preview {}", i)]);
+                cache.insert(path, PreviewContent::Text(vec![format!("preview {}", i)]));
             }
 
             assert_eq!(cache.len(), 3);
@@ -529,12 +534,23 @@ mod tests {
             let mut cache = PreviewCache::new(5);
             let path = PathBuf::from("/test/file.txt");
 
-            cache.insert(path.clone(), vec!["old preview".to_string()]);
-            cache.insert(path.clone(), vec!["new preview".to_string()]);
+            cache.insert(
+                path.clone(),
+                PreviewContent::Text(vec!["old preview".to_string()]),
+            );
+            cache.insert(
+                path.clone(),
+                PreviewContent::Text(vec!["new preview".to_string()]),
+            );
 
             assert_eq!(cache.len(), 1);
             let cached = cache.get(&path).unwrap();
-            assert_eq!(cached, vec!["new preview".to_string()]);
+            match cached {
+                PreviewContent::Text(lines) => {
+                    assert_eq!(lines, vec!["new preview".to_string()]);
+                }
+                _ => panic!("Expected Text content"),
+            }
         }
     }
 

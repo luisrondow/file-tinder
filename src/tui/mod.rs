@@ -77,7 +77,7 @@ pub fn render_summary(frame: &mut Frame, stats: &DecisionStatistics) {
     frame.render_widget(Clear, summary_area);
 
     let block = Block::default()
-        .title(" ✨ Session Complete ✨ ")
+        .title(" Session Complete ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -96,7 +96,7 @@ pub fn render_summary(frame: &mut Frame, stats: &DecisionStatistics) {
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "📊 Summary",
+            "Summary",
             Style::default()
                 .fg(TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
@@ -164,7 +164,7 @@ pub fn render_help_overlay(frame: &mut Frame) {
     frame.render_widget(Clear, help_area);
 
     let block = Block::default()
-        .title(" ❓ Help ")
+        .title(" Help ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -268,11 +268,7 @@ fn render_header_polished(frame: &mut Frame, area: Rect, state: &AppState) {
         let size_str = format_file_size(file.size);
         let file_type = format!("{:?}", file.file_type);
         (
-            format!(
-                " 🗂  File {}/{} ",
-                state.current_index + 1,
-                state.files.len()
-            ),
+            format!(" File {}/{} ", state.current_index + 1, state.files.len()),
             vec![
                 Span::styled(
                     &file.name,
@@ -289,7 +285,7 @@ fn render_header_polished(frame: &mut Frame, area: Rect, state: &AppState) {
         )
     } else {
         (
-            " 🗂  File Tinder ".to_string(),
+            " File Tinder ".to_string(),
             vec![Span::styled(
                 "No files to review",
                 Style::default().fg(TEXT_SECONDARY),
@@ -347,22 +343,24 @@ fn render_header_polished(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Renders the main content area (synchronous version)
 fn render_content(frame: &mut Frame, area: Rect, state: &AppState) {
+    use crate::preview::PreviewContent;
+
     let content = if let Some(file) = state.current_file() {
         // Generate file preview
-        let preview_lines = match preview::generate_preview(file) {
-            Ok(lines) => lines,
+        let lines: Vec<Line> = match preview::generate_preview(file) {
+            Ok(PreviewContent::Text(text_lines)) => {
+                text_lines.into_iter().map(Line::from).collect()
+            }
+            Ok(PreviewContent::Styled(styled_lines)) => styled_lines,
             Err(e) => vec![
-                format!("Error generating preview: {}", e),
-                String::new(),
-                format!("File: {}", file.name),
-                format!("Path: {}", file.path.display()),
-                format!("Size: {} bytes", file.size),
-                format!("Type: {:?}", file.file_type),
+                Line::from(format!("Error generating preview: {}", e)),
+                Line::from(""),
+                Line::from(format!("File: {}", file.name)),
+                Line::from(format!("Path: {}", file.path.display())),
+                Line::from(format!("Size: {} bytes", file.size)),
+                Line::from(format!("Type: {:?}", file.file_type)),
             ],
         };
-
-        // Convert strings to Lines
-        let lines: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
 
         Paragraph::new(lines)
             .block(
@@ -370,7 +368,7 @@ fn render_content(frame: &mut Frame, area: Rect, state: &AppState) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(BORDER_COLOR))
-                    .title(format!(" 📄 {} ", file.name)),
+                    .title(format!(" {} ", file.name)),
             )
             .style(Style::default().fg(TEXT_PRIMARY))
             .wrap(Wrap { trim: false })
@@ -387,7 +385,7 @@ fn render_empty_state_widget() -> Paragraph<'static> {
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
-            "📂 No Files Found",
+            "No Files Found",
             Style::default()
                 .fg(ACCENT_HIGHLIGHT)
                 .add_modifier(Modifier::BOLD),
@@ -422,34 +420,43 @@ fn render_content_async(
     state: &AppState,
     preview_manager: &mut SyncPreviewManager,
 ) {
+    use crate::preview::PreviewContent;
+
     let content = if let Some(file) = state.current_file() {
         // Get preview state from manager
         let preview_state = preview_manager.request_preview(file);
 
-        let (preview_lines, title_suffix, border_color) = match preview_state {
-            PreviewState::Loading => {
-                let loading_lines = generate_loading_indicator(file);
-                (loading_lines, " ⏳", ACCENT_HIGHLIGHT)
-            }
-            PreviewState::Ready(lines) => (lines.clone(), "", BORDER_COLOR),
-            PreviewState::Error(e) => {
-                let error_lines = vec![
-                    String::new(),
-                    format!("  ⚠️  Error generating preview"),
-                    String::new(),
-                    format!("  {}", e),
-                    String::new(),
-                    format!("  File: {}", file.name),
-                    format!("  Path: {}", file.path.display()),
-                    format!("  Size: {}", format_file_size(file.size)),
-                    format!("  Type: {:?}", file.file_type),
-                ];
-                (error_lines, " ⚠️", ACCENT_PRIMARY)
-            }
-        };
-
-        // Convert strings to Lines
-        let lines: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+        let (lines, title_suffix, border_color): (Vec<Line>, &str, ratatui::style::Color) =
+            match preview_state {
+                PreviewState::Loading => {
+                    let loading_lines = generate_loading_indicator(file);
+                    let lines: Vec<Line> = loading_lines.into_iter().map(Line::from).collect();
+                    (lines, " ...", ACCENT_HIGHLIGHT)
+                }
+                PreviewState::Ready(preview_content) => {
+                    let lines = match preview_content {
+                        PreviewContent::Text(text_lines) => {
+                            text_lines.iter().map(|s| Line::from(s.clone())).collect()
+                        }
+                        PreviewContent::Styled(styled_lines) => styled_lines.clone(),
+                    };
+                    (lines, "", BORDER_COLOR)
+                }
+                PreviewState::Error(e) => {
+                    let error_lines: Vec<Line> = vec![
+                        Line::from(""),
+                        Line::from("  [!] Error generating preview"),
+                        Line::from(""),
+                        Line::from(format!("  {}", e)),
+                        Line::from(""),
+                        Line::from(format!("  File: {}", file.name)),
+                        Line::from(format!("  Path: {}", file.path.display())),
+                        Line::from(format!("  Size: {}", format_file_size(file.size))),
+                        Line::from(format!("  Type: {:?}", file.file_type)),
+                    ];
+                    (error_lines, " [!]", ACCENT_PRIMARY)
+                }
+            };
 
         Paragraph::new(lines)
             .block(
@@ -457,7 +464,7 @@ fn render_content_async(
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(border_color))
-                    .title(format!(" 📄 {}{} ", file.name, title_suffix)),
+                    .title(format!(" {}{} ", file.name, title_suffix)),
             )
             .style(Style::default().fg(TEXT_PRIMARY))
             .wrap(Wrap { trim: false })
@@ -473,9 +480,9 @@ fn generate_loading_indicator(file: &crate::domain::FileEntry) -> Vec<String> {
     vec![
         String::new(),
         String::new(),
-        format!("  📂 Loading preview..."),
+        format!("  Loading preview..."),
         String::new(),
-        format!("  ⏳ Processing: {}", file.name),
+        format!("  Processing: {}", file.name),
         String::new(),
         format!("  Type: {:?}", file.file_type),
         format!("  Size: {}", format_file_size(file.size)),

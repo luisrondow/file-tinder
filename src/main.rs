@@ -66,7 +66,7 @@ pub fn run_app_with_config(config: &AppConfig) -> io::Result<()> {
 
     // Print dry-run notice
     if config.dry_run {
-        println!("🔍 DRY RUN MODE - No files will be moved to trash");
+        println!("[DRY RUN] No files will be moved to trash");
         println!("   Found {} files to review", files.len());
         println!("   Press Enter to continue...");
         let mut input = String::new();
@@ -102,7 +102,7 @@ pub fn run_app_with_config(config: &AppConfig) -> io::Result<()> {
     // Print summary after exit
     if config.dry_run {
         let stats = decision_engine.get_statistics();
-        println!("\n🔍 DRY RUN COMPLETE");
+        println!("\n[DRY RUN] Complete");
         println!("   Would have kept: {} files", stats.kept);
         println!("   Would have trashed: {} files", stats.trashed);
     }
