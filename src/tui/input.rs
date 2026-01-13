@@ -21,6 +21,8 @@ pub enum KeyAction {
     Undo,
     /// Toggle help overlay
     Help,
+    /// Open current file in editor/application
+    Open,
     /// No action
     None,
 }
@@ -53,6 +55,9 @@ pub fn handle_key_event(key: KeyEvent) -> KeyAction {
 
         // Help: ?
         (KeyCode::Char('?'), KeyModifiers::NONE) => KeyAction::Help,
+
+        // Open: o
+        (KeyCode::Char('o'), KeyModifiers::NONE) => KeyAction::Open,
 
         _ => KeyAction::None,
     }
@@ -138,6 +143,12 @@ mod tests {
     fn test_key_help() {
         let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
         assert_eq!(handle_key_event(key), KeyAction::Help);
+    }
+
+    #[test]
+    fn test_key_open() {
+        let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(handle_key_event(key), KeyAction::Open);
     }
 
     #[test]
