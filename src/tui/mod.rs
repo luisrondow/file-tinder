@@ -213,6 +213,11 @@ pub fn render_help_overlay(frame: &mut Frame) {
         ]),
         Line::from(""),
         Line::from(vec![
+            Span::styled("  o ", Style::default().fg(TEXT_SECONDARY)),
+            Span::raw("          Open file in editor"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
             Span::styled("  q ", Style::default().fg(TEXT_SECONDARY)),
             Span::raw("or "),
             Span::styled("Esc", Style::default().fg(TEXT_SECONDARY)),

@@ -7,6 +7,7 @@ pub mod async_preview;
 pub mod cli;
 pub mod domain;
 pub mod error;
+pub mod file_opener;
 pub mod preview;
 pub mod tui;
 
@@ -16,3 +17,4 @@ pub use domain::{
     DecisionStatistics, DiscoveryOptions, FileEntry, FileType, SortBy,
 };
 pub use error::{FileTinderError, Result};
+pub use file_opener::open_file;

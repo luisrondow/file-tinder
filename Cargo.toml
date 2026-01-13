@@ -23,6 +23,8 @@ pdfium-render = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "1"
+edit = "0.1"
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

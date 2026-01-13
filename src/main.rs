@@ -3,6 +3,7 @@ use fswp::cli::{AppConfig, Args, SortOrder};
 use fswp::domain::{
     discover_files_with_options, AppState, Decision, DecisionEngine, DiscoveryOptions, SortBy,
 };
+use fswp::open_file;
 use fswp::tui::{
     handle_confirm_input, handle_key_event, render_confirm_trash_overlay, render_help_overlay,
     render_summary, render_with_preview, KeyAction, ViewState,
@@ -111,8 +112,29 @@ pub fn run_app_with_config(config: &AppConfig) -> io::Result<()> {
     result
 }
 
+/// Suspends the TUI terminal to allow external programs to run
+fn suspend_terminal<B: ratatui::backend::Backend + std::io::Write>(
+    terminal: &mut Terminal<B>,
+) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Resumes the TUI terminal after external program exits
+fn resume_terminal<B: ratatui::backend::Backend + std::io::Write>(
+    terminal: &mut Terminal<B>,
+) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    Ok(())
+}
+
 /// Main application loop
-fn run_loop<B: ratatui::backend::Backend>(
+fn run_loop<B: ratatui::backend::Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
     app_state: &mut AppState,
     decision_engine: &mut DecisionEngine,
@@ -260,6 +282,29 @@ fn run_loop<B: ratatui::backend::Backend>(
                     }
                     KeyAction::Help => {
                         view_state = ViewState::Help;
+                    }
+                    KeyAction::Open => {
+                        if let Some(file) = app_state.current_file() {
+                            // Suspend terminal before opening external program
+                            if let Err(e) = suspend_terminal(terminal) {
+                                eprintln!("Failed to suspend terminal: {}", e);
+                                continue;
+                            }
+
+                            // Open the file (blocking call)
+                            let open_result = open_file(&file.path);
+
+                            // Resume terminal after external program exits
+                            if let Err(e) = resume_terminal(terminal) {
+                                eprintln!("Failed to resume terminal: {}", e);
+                                return Err(e);
+                            }
+
+                            // Handle any errors from opening the file
+                            if let Err(e) = open_result {
+                                eprintln!("Failed to open file: {}", e);
+                            }
+                        }
                     }
                     KeyAction::ConfirmTrash | KeyAction::CancelTrash => {
                         // These actions are only handled in ConfirmTrash state

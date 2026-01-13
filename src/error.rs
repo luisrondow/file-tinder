@@ -25,6 +25,9 @@ pub enum FileTinderError {
 
     #[error("Configuration error: {0}")]
     ConfigError(String),
+
+    #[error("Failed to open file: {0}")]
+    OpenFileError(String),
 }
 
 pub type Result<T> = std::result::Result<T, FileTinderError>;
